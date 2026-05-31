@@ -22,10 +22,16 @@ uniform sampler2D uSprite;
 uniform sampler2D uPalette;
 uniform bool uIndexed;
 uniform vec4 uTint;
+uniform int uMask;
 out vec4 fragColor;
 void main(){
 	vec4 c;
-	if(uIndexed){ float rawIndex = texture(uSprite, vUV).r; int index = int(rawIndex * 255.0 + 0.5); c = texelFetch(uPalette, ivec2(index, 0), 0); }
+	if(uIndexed){
+		float rawIndex = texture(uSprite, vUV).r;
+		int index = int(rawIndex * 255.0 + 0.5);
+		if(uMask > 0 && index == uMask){ discard; }
+		c = texelFetch(uPalette, ivec2(index, 0), 0);
+	}
 	else { c = texture(uSprite, vUV); }
 	fragColor = c * uTint;
 }
@@ -39,6 +45,7 @@ type GLRenderer struct {
 	uPalette     int32
 	uIndexed     int32
 	uTint        int32
+	uMask        int32
 	spriteCache  map[*Sprite]uint32
 	paletteCache map[*PaletteEntry]uint32
 }
@@ -163,21 +170,14 @@ func (r *GLRenderer) RenderSprite(rp RenderParams) error {
 	}
 
 	verts := r.makeVertices(rp)
-
-	switch rp.BlendMode {
-	case TransAdd:
-		gl.BlendEquation(gl.FUNC_ADD)
-		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
-	case TransSub:
-		gl.BlendEquation(gl.FUNC_REVERSE_SUBTRACT)
-		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
-	default:
-		gl.BlendEquation(gl.FUNC_ADD)
-		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
-	}
+	tint := rp.Tint
+	r.applyBlend(rp.BlendMode, rp.Alpha, &tint)
+	r.applyScissor(rp.Window)
+	defer gl.Disable(gl.SCISSOR_TEST)
 
 	gl.UseProgram(r.program)
-	gl.Uniform4f(r.uTint, rp.Tint[0], rp.Tint[1], rp.Tint[2], rp.Tint[3])
+	gl.Uniform4f(r.uTint, tint[0], tint[1], tint[2], tint[3])
+	gl.Uniform1i(r.uMask, int32(rp.Mask))
 	gl.ActiveTexture(gl.TEXTURE0)
 	gl.BindTexture(gl.TEXTURE_2D, spTex)
 	gl.Uniform1i(r.uSprite, 0)
@@ -200,6 +200,93 @@ func (r *GLRenderer) RenderSprite(rp RenderParams) error {
 	return nil
 }
 
+func clampAlpha(v int32) int32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
+}
+
+func alpha01(v int32) float32 {
+	return float32(clampAlpha(v)) / 255.0
+}
+
+func blendFactorForDestination(alpha int32, fallback uint32) uint32 {
+	if clampAlpha(alpha) == 0 {
+		return fallback
+	}
+	return gl.CONSTANT_ALPHA
+}
+
+func (r *GLRenderer) applyBlend(mode TransType, alpha [2]int32, tint *[4]float32) {
+	src := clampAlpha(alpha[0])
+	dst := clampAlpha(alpha[1])
+	if src == 0 && dst == 0 {
+		// Preserve historical behavior if callers leave Alpha unset.
+		src = 255
+	}
+
+	srcScale := alpha01(src)
+	dstScale := alpha01(dst)
+	tint[3] *= srcScale
+	gl.BlendColor(0, 0, 0, dstScale)
+
+	switch mode {
+	case TransNone:
+		gl.BlendEquation(gl.FUNC_ADD)
+		gl.BlendFunc(gl.ONE, gl.ZERO)
+	case TransAdd:
+		gl.BlendEquation(gl.FUNC_ADD)
+		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
+	case TransSub:
+		gl.BlendEquation(gl.FUNC_REVERSE_SUBTRACT)
+		gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
+	default:
+		gl.BlendEquation(gl.FUNC_ADD)
+		gl.BlendFunc(gl.SRC_ALPHA, blendFactorForDestination(dst, gl.ONE_MINUS_SRC_ALPHA))
+	}
+}
+
+func (r *GLRenderer) applyScissor(window *[4]int32) {
+	if window == nil {
+		gl.Disable(gl.SCISSOR_TEST)
+		return
+	}
+
+	x, y, w, h := window[0], window[1], window[2], window[3]
+	if w <= 0 || h <= 0 {
+		gl.Disable(gl.SCISSOR_TEST)
+		return
+	}
+
+	if x < 0 {
+		w += x
+		x = 0
+	}
+	if y < 0 {
+		h += y
+		y = 0
+	}
+	if x+w > r.winW {
+		w = r.winW - x
+	}
+	if y+h > r.winH {
+		h = r.winH - y
+	}
+	if w <= 0 || h <= 0 {
+		gl.Disable(gl.SCISSOR_TEST)
+		return
+	}
+
+	// RenderParams use top-left coordinates. OpenGL scissor uses bottom-left
+	// coordinates, so convert Y here.
+	gl.Enable(gl.SCISSOR_TEST)
+	gl.Scissor(x, r.winH-y-h, w, h)
+}
+
 func (r *GLRenderer) makeVertices(rp RenderParams) []float32 {
 	sp := rp.Sprite
 	sx, sy := rp.ScaleX, rp.ScaleY
@@ -214,6 +301,10 @@ func (r *GLRenderer) makeVertices(rp RenderParams) []float32 {
 	h := math.Abs(float64(sp.H) * sy)
 	cx := rp.X + w/2
 	cy := rp.Y + h/2
+	if rp.RotCenter != [2]float64{} {
+		cx = rp.X + rp.RotCenter[0]
+		cy = rp.Y + rp.RotCenter[1]
+	}
 
 	rad := rp.Angle * math.Pi / 180
 	ca := math.Cos(rad)
@@ -233,10 +324,10 @@ func (r *GLRenderer) makeVertices(rp RenderParams) []float32 {
 		u, v float32
 	}
 	corners := []pt{
-		{-w / 2, -h / 2, u0, v0},
-		{w / 2, -h / 2, u1, v0},
-		{w / 2, h / 2, u1, v1},
-		{-w / 2, h / 2, u0, v1},
+		{rp.X - cx, rp.Y - cy, u0, v0},
+		{rp.X + w - cx, rp.Y - cy, u1, v0},
+		{rp.X + w - cx, rp.Y + h - cy, u1, v1},
+		{rp.X - cx, rp.Y + h - cy, u0, v1},
 	}
 	idx := []int{0, 1, 2, 0, 2, 3}
 

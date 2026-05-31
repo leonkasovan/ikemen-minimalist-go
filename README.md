@@ -17,6 +17,35 @@ A minimalist [Ikemen Go](https://github.com/ikemen-engine/Ikemen_GO)-style sprit
 
 ![screenshot](https://i.imgur.com/n3cP3t6.png)
 
+
+## Complete Runtime Key Usage
+
+`main.go` prints this list at startup. Press `H` while running to print it again.
+
+```text
+Esc                 Quit
+Right / Space / N   Next animation
+Left / P            Previous animation
+R                   Random animation
+1                   Blend: alpha
+2                   Blend: add
+3                   Blend: sub
+4                   Clear palette override/remap
+[                   Previous palette override
+]                   Next palette override
+5                   Remap current default palette forward
+6                   Remap current default palette backward
+F1                  Toggle Window/scissor clipping: [160,120,320,240]
+F2                  Cycle Mask index 0..8 for indexed sprites
+F3                  Add +15 degrees debug rotation
+F4                  Toggle custom rotation center
+F5                  Set Alpha to [128,0]
+F6                  Set Alpha to [255,128]
+F7                  Reset Alpha to [255,0]
+F8                  Blend: none
+H                   Print this help again
+```
+
 ## Controls
 
 | Key | Action |

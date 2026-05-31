@@ -37,6 +37,8 @@ func blendName(t TransType) string {
 		return "add"
 	case TransSub:
 		return "sub"
+	case TransNone:
+		return "none"
 	default:
 		return "alpha"
 	}
@@ -45,6 +47,31 @@ func blendName(t TransType) string {
 func updateTitle(win *sdl.Window, anim *Animation, inst *AnimationInstance, idx, total int) {
 	title := fmt.Sprintf("ikemen-minimalist | action %d (%d/%d) | blend %s | pal %s", anim.No, idx+1, total, blendName(inst.BlendMode), inst.PaletteName())
 	win.SetTitle(title)
+}
+
+func printKeyUsage() {
+	fmt.Println("Key usage:")
+	fmt.Println("  Esc                 Quit")
+	fmt.Println("  Right / Space / N   Next animation")
+	fmt.Println("  Left / P            Previous animation")
+	fmt.Println("  R                   Random animation")
+	fmt.Println("  1                   Blend: alpha")
+	fmt.Println("  2                   Blend: add")
+	fmt.Println("  3                   Blend: sub")
+	fmt.Println("  4                   Clear palette override/remap")
+	fmt.Println("  [                   Previous palette override")
+	fmt.Println("  ]                   Next palette override")
+	fmt.Println("  5                   Remap current default palette forward")
+	fmt.Println("  6                   Remap current default palette backward")
+	fmt.Println("  F1                  Toggle Window/scissor clipping: [160,120,320,240]")
+	fmt.Println("  F2                  Cycle Mask index 0..8 for indexed sprites")
+	fmt.Println("  F3                  Add +15 degrees debug rotation")
+	fmt.Println("  F4                  Toggle custom rotation center")
+	fmt.Println("  F5                  Set Alpha to [128,0]")
+	fmt.Println("  F6                  Set Alpha to [255,128]")
+	fmt.Println("  F7                  Reset Alpha to [255,0]")
+	fmt.Println("  F8                  Blend: none")
+	fmt.Println("  H                   Print this help again")
 }
 
 func main() {
@@ -107,6 +134,8 @@ func main() {
 
 	anim, animIndex := setAnimation(drawable, rand.Intn(len(drawable)))
 	inst := NewAnimationInstance(sff, anim)
+
+	printKeyUsage()
 
 	fmt.Println("Starting SDL...")
 
@@ -180,10 +209,43 @@ func main() {
 					inst.SetAnim(anim)
 				case sdl.SCANCODE_1:
 					inst.BlendMode = TransAlpha
+					fmt.Println("blend: alpha")
 				case sdl.SCANCODE_2:
 					inst.BlendMode = TransAdd
+					fmt.Println("blend: add")
 				case sdl.SCANCODE_3:
 					inst.BlendMode = TransSub
+					fmt.Println("blend: sub")
+				case sdl.SCANCODE_F1:
+					inst.DebugClip = !inst.DebugClip
+					fmt.Printf("debug clip: %v\n", inst.DebugClip)
+				case sdl.SCANCODE_F2:
+					inst.DebugMask++
+					if inst.DebugMask > 8 {
+						inst.DebugMask = 0
+					}
+					fmt.Printf("debug mask index: %d\n", inst.DebugMask)
+				case sdl.SCANCODE_F3:
+					inst.DebugAngle += 15
+					if inst.DebugAngle >= 360 {
+						inst.DebugAngle -= 360
+					}
+					fmt.Printf("debug angle offset: %.0f\n", inst.DebugAngle)
+				case sdl.SCANCODE_F4:
+					inst.DebugRotCenter = !inst.DebugRotCenter
+					fmt.Printf("debug custom rotation center: %v\n", inst.DebugRotCenter)
+				case sdl.SCANCODE_F5:
+					inst.Alpha = [2]int32{128, 0}
+					fmt.Printf("debug alpha: %v\n", inst.Alpha)
+				case sdl.SCANCODE_F6:
+					inst.Alpha = [2]int32{255, 128}
+					fmt.Printf("debug alpha: %v\n", inst.Alpha)
+				case sdl.SCANCODE_F7:
+					inst.Alpha = [2]int32{255, 0}
+					fmt.Printf("debug alpha reset: %v\n", inst.Alpha)
+				case sdl.SCANCODE_F8:
+					inst.BlendMode = TransNone
+					fmt.Println("blend: none")
 				case sdl.SCANCODE_4:
 					inst.ClearPalette()
 				case sdl.SCANCODE_LEFTBRACKET:
@@ -194,6 +256,8 @@ func main() {
 					inst.RemapCurrentDefault(1)
 				case sdl.SCANCODE_6:
 					inst.RemapCurrentDefault(-1)
+				case sdl.SCANCODE_H:
+					printKeyUsage()
 				default:
 					changed = false
 				}

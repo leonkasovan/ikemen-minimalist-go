@@ -18,6 +18,11 @@ type AnimationInstance struct {
 	Tint            [4]float32
 	PalRemap        PalRemap
 	PaletteOverride int // -1 means use default/remap
+
+	DebugClip      bool
+	DebugMask      int32
+	DebugRotCenter bool
+	DebugAngle     float64
 }
 
 func NewAnimationInstance(sff *SFF, anim *Animation) *AnimationInstance {
@@ -154,6 +159,19 @@ func (ai *AnimationInstance) Draw(dl *DrawList) {
 	drawX := ai.X - float64(sp.XOff) + float64(fr.Xoff) - dw/2
 	drawY := ai.Y - float64(sp.YOff) + float64(fr.Yoff) - dh
 
+	angle := fr.Angle + ai.DebugAngle
+
+	var window *[4]int32
+	if ai.DebugClip {
+		clip := [4]int32{160, 120, 320, 240}
+		window = &clip
+	}
+
+	rotCenter := [2]float64{}
+	if ai.DebugRotCenter {
+		rotCenter = [2]float64{0, float64(sp.H)}
+	}
+
 	pal := ai.SFF.ResolvePalette(sp, ai.PaletteOverride, ai.PalRemap)
 	dl.Add(RenderParams{
 		Sprite:    sp,
@@ -162,12 +180,15 @@ func (ai *AnimationInstance) Draw(dl *DrawList) {
 		Y:         drawY,
 		ScaleX:    sx,
 		ScaleY:    sy,
-		Angle:     fr.Angle,
+		Angle:     angle,
 		FlipX:     fr.HFlip,
 		FlipY:     fr.VFlip,
 		Tint:      ai.Tint,
 		BlendMode: ai.BlendMode,
 		Alpha:     ai.Alpha,
+		Mask:      ai.DebugMask,
+		Window:    window,
+		RotCenter: rotCenter,
 		Layer:     ai.Layer,
 		Priority:  ai.Priority,
 	})
