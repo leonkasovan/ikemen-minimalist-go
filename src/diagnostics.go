@@ -21,6 +21,13 @@ type RenderDiagnostics struct {
 	DrawableActionCount int
 	MissingAIRRefs      []MissingAIRRef
 	DrawableActions     map[int]bool
+
+	DuplicateSpriteKeys   int
+	DuplicatePaletteKeys  int
+	InvalidLinkedSprites  int
+	InvalidLinkedPalettes int
+	DecodeErrorCount      int
+	DecodeErrors          []string
 }
 
 // BuildRenderDiagnostics verifies that the loaded SFF sprite table and AIR
@@ -28,13 +35,19 @@ type RenderDiagnostics struct {
 // parity checks separate from palette remapping and the indexed OpenGL path.
 func BuildRenderDiagnostics(sff *SFF, animations []*Animation) RenderDiagnostics {
 	d := RenderDiagnostics{
-		SFFVersion:         sff.Version,
-		SpriteHeaderCount:  sff.SpriteHeaderCount,
-		DecodedSpriteCount: len(sff.Sprites),
-		PaletteCount:       len(sff.Palettes),
-		LinkedSpriteCount:  sff.LinkedSpriteCount,
-		AIRActionCount:     len(animations),
-		DrawableActions:    map[int]bool{},
+		SFFVersion:            sff.Version,
+		SpriteHeaderCount:     sff.SpriteHeaderCount,
+		DecodedSpriteCount:    len(sff.Sprites),
+		PaletteCount:          len(sff.Palettes),
+		LinkedSpriteCount:     sff.LinkedSpriteCount,
+		AIRActionCount:        len(animations),
+		DuplicateSpriteKeys:   sff.DuplicateSpriteKeys,
+		DuplicatePaletteKeys:  sff.DuplicatePaletteKeys,
+		InvalidLinkedSprites:  sff.InvalidLinkedSprites,
+		InvalidLinkedPalettes: sff.InvalidLinkedPalettes,
+		DecodeErrorCount:      sff.DecodeErrorCount,
+		DecodeErrors:          append([]string(nil), sff.DecodeErrors...),
+		DrawableActions:       map[int]bool{},
 	}
 
 	missing := map[[2]int]bool{}
@@ -77,6 +90,14 @@ func (d RenderDiagnostics) Print(w io.Writer) {
 	fmt.Fprintf(w, "  decoded sprite count: %d\n", d.DecodedSpriteCount)
 	fmt.Fprintf(w, "  linked sprite count: %d\n", d.LinkedSpriteCount)
 	fmt.Fprintf(w, "  palette count: %d\n", d.PaletteCount)
+	fmt.Fprintf(w, "  duplicate sprite keys: %d\n", d.DuplicateSpriteKeys)
+	fmt.Fprintf(w, "  duplicate palette keys: %d\n", d.DuplicatePaletteKeys)
+	fmt.Fprintf(w, "  invalid linked sprites: %d\n", d.InvalidLinkedSprites)
+	fmt.Fprintf(w, "  invalid linked palettes: %d\n", d.InvalidLinkedPalettes)
+	fmt.Fprintf(w, "  decode errors: %d\n", d.DecodeErrorCount)
+	for _, msg := range d.DecodeErrors {
+		fmt.Fprintf(w, "    decode: %s\n", msg)
+	}
 	fmt.Fprintf(w, "  AIR action count: %d\n", d.AIRActionCount)
 	fmt.Fprintf(w, "  drawable action count: %d\n", d.DrawableActionCount)
 	fmt.Fprintf(w, "  action 5100 drawable: %v\n", d.DrawableActions[5100])

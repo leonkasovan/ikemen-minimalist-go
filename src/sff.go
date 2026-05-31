@@ -26,6 +26,11 @@ type SFF struct {
 	Palettes     []PaletteEntry
 	PaletteByKey map[[2]uint16]int
 
+	// PaletteIndexByHeader maps SFF v2 palette-header indices to the compact
+	// Palettes slice. This keeps duplicate palette keys compatible with original
+	// Ikemen behavior, where duplicate keys point back to the first palette.
+	PaletteIndexByHeader []int
+
 	// Diagnostics captured while loading. These are intentionally simple
 	// counters so the viewer can verify SFF/AIR parity without touching
 	// the renderer, palette remap, or OpenGL indexed texture path.
@@ -33,6 +38,13 @@ type SFF struct {
 	SpriteHeaderCount  int
 	DecodedSpriteCount int
 	LinkedSpriteCount  int
+
+	DuplicateSpriteKeys   int
+	DuplicatePaletteKeys  int
+	InvalidLinkedSprites  int
+	InvalidLinkedPalettes int
+	DecodeErrorCount      int
+	DecodeErrors          []string
 }
 
 type decodedSprite struct {
@@ -47,11 +59,52 @@ func u32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
 func newSFF() *SFF { return &SFF{Sprites: map[[2]uint16]*Sprite{}, PaletteByKey: map[[2]uint16]int{}} }
 func (s *SFF) addPalette(group, item uint16, rgba []byte) int {
+	key := [2]uint16{group, item}
+	if idx, ok := s.PaletteByKey[key]; ok {
+		// Match original Ikemen: duplicate palette keys keep the first palette.
+		s.DuplicatePaletteKeys++
+		return idx
+	}
 	idx := len(s.Palettes)
 	s.Palettes = append(s.Palettes, PaletteEntry{Group: group, Item: item, RGBA: ensurePalette(rgba)})
-	s.PaletteByKey[[2]uint16{group, item}] = idx
+	s.PaletteByKey[key] = idx
 	return idx
 }
+
+func (s *SFF) addSprite(sp *Sprite) bool {
+	if sp == nil {
+		return false
+	}
+	key := [2]uint16{sp.Group, sp.Number}
+	if s.Sprites[key] != nil {
+		// Match original Ikemen: keep the first sprite for duplicate keys.
+		s.DuplicateSpriteKeys++
+		return false
+	}
+	s.Sprites[key] = sp
+	return true
+}
+
+func (s *SFF) recordDecodeError(format string, args ...any) {
+	s.DecodeErrorCount++
+	if len(s.DecodeErrors) < 20 {
+		s.DecodeErrors = append(s.DecodeErrors, fmt.Sprintf(format, args...))
+	}
+}
+
+func (s *SFF) paletteIndexFromHeader(headerIndex int) int {
+	if headerIndex >= 0 && headerIndex < len(s.PaletteIndexByHeader) {
+		idx := s.PaletteIndexByHeader[headerIndex]
+		if idx >= 0 && idx < len(s.Palettes) {
+			return idx
+		}
+	}
+	if headerIndex >= 0 && headerIndex < len(s.Palettes) {
+		return headerIndex
+	}
+	return 0
+}
+
 func (s *SFF) ResolvePalette(sp *Sprite, override int, remap PalRemap) *PaletteEntry {
 	if sp == nil || !sp.IsIndexed || len(s.Palettes) == 0 {
 		return nil
@@ -138,11 +191,16 @@ func loadSFFv1(data []byte, s *SFF) (*SFF, error) {
 		// SFF v1 linked sprites have their own group/number and axis but reuse
 		// pixel data from a previous subfile. AIR can reference these group/number
 		// pairs directly, so they must be present in SFF.Sprites.
-		if size == 0 && link >= 0 && link < len(spritesByIndex) && spritesByIndex[link] != nil {
-			sp := cloneLinkedSprite(spritesByIndex[link], grp, num, xo, yo, -1)
-			s.Sprites[[2]uint16{grp, num}] = sp
-			s.LinkedSpriteCount++
-			spritesByIndex = append(spritesByIndex, sp)
+		if size == 0 {
+			if link >= 0 && link < len(spritesByIndex) && spritesByIndex[link] != nil {
+				sp := cloneLinkedSprite(spritesByIndex[link], grp, num, xo, yo, -1)
+				s.addSprite(sp)
+				s.LinkedSpriteCount++
+				spritesByIndex = append(spritesByIndex, sp)
+			} else {
+				s.InvalidLinkedSprites++
+				spritesByIndex = append(spritesByIndex, nil)
+			}
 			if next == 0 {
 				break
 			}
@@ -162,13 +220,15 @@ func loadSFFv1(data []byte, s *SFF) (*SFF, error) {
 		}
 
 		var sp *Sprite
-		if size > 0 && start < end {
+		if start < end {
 			fallback := []byte(nil)
 			if samePalette {
 				fallback = sharedPal
 			}
-			dec, pal, err := decodePCXIndexed(data[start:end], fallback)
-			if err == nil && dec.indexed != nil {
+			dec, pal, err := decodePCXIndexed(data[start:end], fallback, !samePalette)
+			if err != nil {
+				s.recordDecodeError("SFF v1 sprite %d,%d index %d: %v", grp, num, i, err)
+			} else if dec != nil && dec.indexed != nil {
 				palIdx := sharedPalIdx
 				if !samePalette || palIdx < 0 {
 					sharedPal = pal
@@ -179,7 +239,9 @@ func loadSFFv1(data []byte, s *SFF) (*SFF, error) {
 					palIdx = s.addPalette(1, uint16(len(s.Palettes)+1), ensurePalette(pal))
 				}
 				sp = &Sprite{Group: grp, Number: num, W: dec.w, H: dec.h, XOff: xo, YOff: yo, Indexed: dec.indexed, IsIndexed: true, PalIndex: palIdx}
-				s.Sprites[[2]uint16{grp, num}] = sp
+				s.addSprite(sp)
+			} else {
+				s.recordDecodeError("SFF v1 sprite %d,%d index %d: empty decode", grp, num, i)
 			}
 		}
 
@@ -206,6 +268,7 @@ func loadSFFv2(data []byte, s *SFF) (*SFF, error) {
 	for i := 0; i < count; i++ {
 		h := spriteOfs + i*28
 		if h+28 > len(data) {
+			s.recordDecodeError("SFF v2 sprite header %d outside file", i)
 			break
 		}
 		grp, num := u16(data[h:h+2]), u16(data[h+2:h+4])
@@ -214,20 +277,23 @@ func loadSFFv2(data []byte, s *SFF) (*SFF, error) {
 		link := int(u16(data[h+12 : h+14]))
 		format, depth := int(data[h+14]), int(data[h+15])
 		dofs, size := int(u32(data[h+16:h+20])), int(u32(data[h+20:h+24]))
-		palidx := int(u16(data[h+24 : h+26]))
+		palHeaderIdx := int(u16(data[h+24 : h+26]))
 		flags := u16(data[h+26 : h+28])
+		palidx := s.paletteIndexFromHeader(palHeaderIdx)
 
 		// SFF v2 linked sprites have size 0 and point at a previous sprite by
 		// subfile index. They still need a separate map entry because AIR refers
 		// to the linked sprite's own group/number.
-		if size == 0 && link >= 0 && link < len(spritesByIndex) && spritesByIndex[link] != nil {
-			if palidx < 0 || palidx >= len(s.Palettes) {
-				palidx = spritesByIndex[link].PalIndex
+		if size == 0 {
+			if link >= 0 && link < len(spritesByIndex) && spritesByIndex[link] != nil {
+				sp := cloneLinkedSprite(spritesByIndex[link], grp, num, xo, yo, palidx)
+				s.addSprite(sp)
+				s.LinkedSpriteCount++
+				spritesByIndex = append(spritesByIndex, sp)
+			} else {
+				s.InvalidLinkedSprites++
+				spritesByIndex = append(spritesByIndex, nil)
 			}
-			sp := cloneLinkedSprite(spritesByIndex[link], grp, num, xo, yo, palidx)
-			s.Sprites[[2]uint16{grp, num}] = sp
-			s.LinkedSpriteCount++
-			spritesByIndex = append(spritesByIndex, sp)
 			continue
 		}
 
@@ -237,21 +303,24 @@ func loadSFFv2(data []byte, s *SFF) (*SFF, error) {
 			dofs += tofs
 		}
 		if dofs < 0 || dofs >= len(data) || size < 0 {
+			s.recordDecodeError("SFF v2 sprite %d,%d index %d: invalid data offset/size offset=%d size=%d", grp, num, i, dofs, size)
 			spritesByIndex = append(spritesByIndex, nil)
 			continue
 		}
 		end := dofs + size
 		if end > len(data) {
+			s.recordDecodeError("SFF v2 sprite %d,%d index %d: data block truncated offset=%d size=%d", grp, num, i, dofs, size)
 			end = len(data)
 		}
 		dec, err := decodeSFFv2Sprite(data[dofs:end], w, hh, format, depth)
 		var sp *Sprite
-		if err == nil && dec != nil {
-			if palidx < 0 || palidx >= len(s.Palettes) {
-				palidx = 0
-			}
+		if err != nil {
+			s.recordDecodeError("SFF v2 sprite %d,%d index %d format=%d depth=%d: %v", grp, num, i, format, depth, err)
+		} else if dec != nil {
 			sp = &Sprite{Group: grp, Number: num, W: dec.w, H: dec.h, XOff: xo, YOff: yo, Indexed: dec.indexed, RGBA: dec.rgba, IsIndexed: dec.isIndexed, PalIndex: palidx}
-			s.Sprites[[2]uint16{grp, num}] = sp
+			s.addSprite(sp)
+		} else {
+			s.recordDecodeError("SFF v2 sprite %d,%d index %d format=%d depth=%d: empty decode", grp, num, i, format, depth)
 		}
 		spritesByIndex = append(spritesByIndex, sp)
 	}
@@ -260,22 +329,38 @@ func loadSFFv2(data []byte, s *SFF) (*SFF, error) {
 }
 
 func loadSFFv2Palettes(data []byte, s *SFF, palOfs, palCount, lofs int, alphaVersionByte byte) {
+	s.PaletteIndexByHeader = make([]int, palCount)
+	for i := range s.PaletteIndexByHeader {
+		s.PaletteIndexByHeader[i] = -1
+	}
+
 	for i := 0; i < palCount; i++ {
 		h := palOfs + i*16
 		if h+16 > len(data) {
+			s.recordDecodeError("SFF v2 palette header %d outside file", i)
 			break
 		}
 		grp, item := u16(data[h:h+2]), u16(data[h+2:h+4])
-		link := u16(data[h+6 : h+8])
+		link := int(u16(data[h+6 : h+8]))
 		ofs, size := int(u32(data[h+8:h+12]))+lofs, int(u32(data[h+12:h+16]))
-		if size == 0 && int(link) < len(s.Palettes) {
-			s.addPalette(grp, item, s.Palettes[link].RGBA)
+
+		if size == 0 {
+			if link >= 0 && link < len(s.PaletteIndexByHeader) {
+				linkedIdx := s.PaletteIndexByHeader[link]
+				if linkedIdx >= 0 && linkedIdx < len(s.Palettes) {
+					s.PaletteIndexByHeader[i] = s.addPalette(grp, item, s.Palettes[linkedIdx].RGBA)
+					continue
+				}
+			}
+			s.InvalidLinkedPalettes++
 			continue
 		}
+
 		if ofs < 0 || ofs+size > len(data) || size <= 0 {
+			s.recordDecodeError("SFF v2 palette %d,%d header %d: invalid data offset/size offset=%d size=%d", grp, item, i, ofs, size)
 			continue
 		}
-		s.addPalette(grp, item, decodePaletteRGBA(data, ofs, size, alphaVersionByte))
+		s.PaletteIndexByHeader[i] = s.addPalette(grp, item, decodePaletteRGBA(data, ofs, size, alphaVersionByte))
 	}
 }
 
@@ -335,7 +420,7 @@ func decodeSFFv2Sprite(buf []byte, w, h, format, depth int) (*decodedSprite, err
 	return nil, fmt.Errorf("unsupported SFFv2 sprite format=%d depth=%d", format, depth)
 }
 
-func decodePCXIndexed(buf []byte, fallback []byte) (*decodedSprite, []byte, error) {
+func decodePCXIndexed(buf []byte, fallback []byte, readPalette bool) (*decodedSprite, []byte, error) {
 	if len(buf) < 128 {
 		return nil, nil, fmt.Errorf("short pcx")
 	}
@@ -354,24 +439,40 @@ func decodePCXIndexed(buf []byte, fallback []byte) (*decodedSprite, []byte, erro
 
 	pal := fallback
 	end := len(buf)
-	// Standard 8-bit PCX palettes are marked by 0x0c followed by 768 RGB
-	// bytes. Some SFF blocks contain padding, so search backward near the end
-	// instead of assuming the marker is exactly len(buf)-769.
-	if len(buf) >= 769 {
-		for pos := len(buf) - 769; pos >= 128; pos-- {
-			if buf[pos] == 12 && pos+769 <= len(buf) {
-				pal = make([]byte, 256*4)
-				p := buf[pos+1 : pos+769]
-				for i := 0; i < 256; i++ {
-					a := byte(255)
-					if i == 0 {
-						a = 0
-					}
-					pal[i*4], pal[i*4+1], pal[i*4+2], pal[i*4+3] = p[i*3], p[i*3+1], p[i*3+2], a
+
+	// Match original Ikemen's SFF v1 rule: only look for an embedded PCX
+	// palette when the SFF subheader says this sprite owns a new palette.
+	// Same-palette subfiles often contain only the RLE stream. In those files,
+	// bytes equal to 0x0c can appear inside normal RLE data; treating them as a
+	// palette marker cuts the stream early and makes lower rows transparent.
+	if readPalette {
+		paletteOffset := -1
+		if len(buf) >= 769 {
+			for pos := len(buf) - 769; pos >= 128; pos-- {
+				if buf[pos] == 0x0c {
+					paletteOffset = pos
+					break
 				}
-				end = pos
-				break
 			}
+			if paletteOffset < 0 {
+				paletteOffset = len(buf) - 769
+			}
+		}
+
+		if paletteOffset >= 0 && paletteOffset+769 <= len(buf) {
+			pal = make([]byte, 256*4)
+			p := buf[paletteOffset+1 : paletteOffset+769]
+			for i := 0; i < 256; i++ {
+				a := byte(255)
+				if i == 0 {
+					a = 0
+				}
+				pal[i*4+0] = p[i*3+0]
+				pal[i*4+1] = p[i*3+1]
+				pal[i*4+2] = p[i*3+2]
+				pal[i*4+3] = a
+			}
+			end = paletteOffset
 		}
 	}
 
