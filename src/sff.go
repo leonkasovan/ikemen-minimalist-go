@@ -59,25 +59,25 @@ func u32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
 func newSFF() *SFF { return &SFF{Sprites: map[[2]uint16]*Sprite{}, PaletteByKey: map[[2]uint16]int{}} }
 func (s *SFF) addPalette(group, item uint16, rgba []byte) int {
-    // Preserve SFF v2 palette-header index semantics: sprite headers store a palette
-    // header index, so every palette header must append one PaletteEntry. Duplicate
-    // keys only affect key-based remap lookup, where original Ikemen keeps the
-    // first key mapping.
-    idx := len(s.Palettes)
-    s.Palettes = append(s.Palettes, PaletteEntry{
-        Group: group,
-        Item:  item,
-        RGBA:  ensurePalette(rgba),
-    })
+	// Preserve SFF v2 palette-header index semantics: sprite headers store a palette
+	// header index, so every palette header must append one PaletteEntry. Duplicate
+	// keys only affect key-based remap lookup, where original Ikemen keeps the
+	// first key mapping.
+	idx := len(s.Palettes)
+	s.Palettes = append(s.Palettes, PaletteEntry{
+		Group: group,
+		Item:  item,
+		RGBA:  ensurePalette(rgba),
+	})
 
-    key := [2]uint16{group, item}
-    if _, ok := s.PaletteByKey[key]; ok {
-        s.DuplicatePaletteKeys++
-        return idx
-    }
+	key := [2]uint16{group, item}
+	if _, ok := s.PaletteByKey[key]; ok {
+		s.DuplicatePaletteKeys++
+		return idx
+	}
 
-    s.PaletteByKey[key] = idx
-    return idx
+	s.PaletteByKey[key] = idx
+	return idx
 }
 
 func (s *SFF) addSprite(sp *Sprite) bool {
@@ -118,21 +118,25 @@ func (s *SFF) ResolvePalette(sp *Sprite, override int, remap PalRemap) *PaletteE
 	if sp == nil || !sp.IsIndexed || len(s.Palettes) == 0 {
 		return nil
 	}
-	if override >= 0 && override < len(s.Palettes) {
-		return &s.Palettes[override]
-	}
+
 	idx := sp.PalIndex
 	if idx < 0 || idx >= len(s.Palettes) {
 		idx = 0
 	}
 	pal := &s.Palettes[idx]
+
 	if remap != nil {
 		if dst, ok := remap[[2]uint16{pal.Group, pal.Item}]; ok {
-			if dstIdx, ok := s.PaletteByKey[dst]; ok {
-				return &s.Palettes[dstIdx]
+			if dstIdx, ok := s.PaletteByKey[dst]; ok && dstIdx >= 0 && dstIdx < len(s.Palettes) {
+				pal = &s.Palettes[dstIdx]
 			}
 		}
 	}
+
+	if override >= 0 && override < len(s.Palettes) {
+		pal = &s.Palettes[override]
+	}
+
 	return pal
 }
 
@@ -376,36 +380,36 @@ func loadSFFv2Palettes(data []byte, s *SFF, palOfs, palCount, lofs int, alphaVer
 }
 
 func decodePaletteRGBA(data []byte, ofs, size int, alphaVersionByte byte) []byte {
-    pal := make([]byte, 256*4)
+	pal := make([]byte, 256*4)
 
-    n := size / 4
-    if n > 256 {
-        n = 256
-    }
+	n := size / 4
+	if n > 256 {
+		n = 256
+	}
 
-    for i := 0; i < n; i++ {
-        r := data[ofs+i*4+0]
-        g := data[ofs+i*4+1]
-        b := data[ofs+i*4+2]
-        a := data[ofs+i*4+3]
+	for i := 0; i < n; i++ {
+		r := data[ofs+i*4+0]
+		g := data[ofs+i*4+1]
+		b := data[ofs+i*4+2]
+		a := data[ofs+i*4+3]
 
-        // Match original Ikemen alpha handling for SFF v2.0.0.0:
-        // index 0 forced transparent, all others forced opaque.
-        if alphaVersionByte == 0 {
-            if i == 0 {
-                a = 0
-            } else {
-                a = 255
-            }
-        }
+		// Match original Ikemen alpha handling for SFF v2.0.0.0:
+		// index 0 forced transparent, all others forced opaque.
+		if alphaVersionByte == 0 {
+			if i == 0 {
+				a = 0
+			} else {
+				a = 255
+			}
+		}
 
-        pal[i*4+0] = r
-        pal[i*4+1] = g
-        pal[i*4+2] = b
-        pal[i*4+3] = a
-    }
+		pal[i*4+0] = r
+		pal[i*4+1] = g
+		pal[i*4+2] = b
+		pal[i*4+3] = a
+	}
 
-    return pal
+	return pal
 }
 
 func decodeSFFv2Sprite(buf []byte, w, h, format, depth int) (*decodedSprite, error) {
