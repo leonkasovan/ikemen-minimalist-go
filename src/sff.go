@@ -26,9 +26,9 @@ type SFF struct {
 	Palettes     []PaletteEntry
 	PaletteByKey map[[2]uint16]int
 
-	// PaletteIndexByHeader maps SFF v2 palette-header indices to the compact
-	// Palettes slice. This keeps duplicate palette keys compatible with original
-	// Ikemen behavior, where duplicate keys point back to the first palette.
+	// PaletteIndexByHeader maps SFF v2 palette-header indices to Palettes entries.
+	// Sprite headers reference palette header indices directly, so palette headers
+	// are preserved even when their group/item keys are duplicates.
 	PaletteIndexByHeader []int
 
 	// Diagnostics captured while loading. These are intentionally simple
@@ -59,16 +59,25 @@ func u32(b []byte) uint32 { return binary.LittleEndian.Uint32(b) }
 
 func newSFF() *SFF { return &SFF{Sprites: map[[2]uint16]*Sprite{}, PaletteByKey: map[[2]uint16]int{}} }
 func (s *SFF) addPalette(group, item uint16, rgba []byte) int {
-	key := [2]uint16{group, item}
-	if idx, ok := s.PaletteByKey[key]; ok {
-		// Match original Ikemen: duplicate palette keys keep the first palette.
-		s.DuplicatePaletteKeys++
-		return idx
-	}
-	idx := len(s.Palettes)
-	s.Palettes = append(s.Palettes, PaletteEntry{Group: group, Item: item, RGBA: ensurePalette(rgba)})
-	s.PaletteByKey[key] = idx
-	return idx
+    // Preserve SFF v2 palette-header index semantics: sprite headers store a palette
+    // header index, so every palette header must append one PaletteEntry. Duplicate
+    // keys only affect key-based remap lookup, where original Ikemen keeps the
+    // first key mapping.
+    idx := len(s.Palettes)
+    s.Palettes = append(s.Palettes, PaletteEntry{
+        Group: group,
+        Item:  item,
+        RGBA:  ensurePalette(rgba),
+    })
+
+    key := [2]uint16{group, item}
+    if _, ok := s.PaletteByKey[key]; ok {
+        s.DuplicatePaletteKeys++
+        return idx
+    }
+
+    s.PaletteByKey[key] = idx
+    return idx
 }
 
 func (s *SFF) addSprite(sp *Sprite) bool {
@@ -329,6 +338,8 @@ func loadSFFv2(data []byte, s *SFF) (*SFF, error) {
 }
 
 func loadSFFv2Palettes(data []byte, s *SFF, palOfs, palCount, lofs int, alphaVersionByte byte) {
+	// Palette headers must remain addressable by their original header index because
+	// SFF v2 sprite headers store palette-header indices directly.
 	s.PaletteIndexByHeader = make([]int, palCount)
 	for i := range s.PaletteIndexByHeader {
 		s.PaletteIndexByHeader[i] = -1
@@ -365,23 +376,36 @@ func loadSFFv2Palettes(data []byte, s *SFF, palOfs, palCount, lofs int, alphaVer
 }
 
 func decodePaletteRGBA(data []byte, ofs, size int, alphaVersionByte byte) []byte {
-	pal := make([]byte, 256*4)
-	n := size / 4
-	if n > 256 {
-		n = 256
-	}
-	for i := 0; i < n; i++ {
-		b, g, r, a := data[ofs+i*4], data[ofs+i*4+1], data[ofs+i*4+2], data[ofs+i*4+3]
-		if alphaVersionByte == 0 {
-			if i == 0 {
-				a = 0
-			} else {
-				a = 255
-			}
-		}
-		pal[i*4], pal[i*4+1], pal[i*4+2], pal[i*4+3] = r, g, b, a
-	}
-	return pal
+    pal := make([]byte, 256*4)
+
+    n := size / 4
+    if n > 256 {
+        n = 256
+    }
+
+    for i := 0; i < n; i++ {
+        r := data[ofs+i*4+0]
+        g := data[ofs+i*4+1]
+        b := data[ofs+i*4+2]
+        a := data[ofs+i*4+3]
+
+        // Match original Ikemen alpha handling for SFF v2.0.0.0:
+        // index 0 forced transparent, all others forced opaque.
+        if alphaVersionByte == 0 {
+            if i == 0 {
+                a = 0
+            } else {
+                a = 255
+            }
+        }
+
+        pal[i*4+0] = r
+        pal[i*4+1] = g
+        pal[i*4+2] = b
+        pal[i*4+3] = a
+    }
+
+    return pal
 }
 
 func decodeSFFv2Sprite(buf []byte, w, h, format, depth int) (*decodedSprite, error) {
@@ -575,138 +599,176 @@ func paletteFromGoPalette(gp color.Palette) []byte {
 }
 
 func rle8Decode(rle []byte, outSize int) []byte {
+	if len(rle) == 0 {
+		return rle
+	}
+
 	p := make([]byte, outSize)
 	i, j := 0, 0
-	for j < len(p) && i < len(rle) {
+
+	for j < len(p) {
 		n, d := 1, rle[i]
-		i++
-		if d&0xc0 == 0x40 && i < len(rle) {
-			n = int(d & 0x3f)
-			d = rle[i]
+		if i < len(rle)-1 {
 			i++
 		}
-		for ; n > 0 && j < len(p); n-- {
-			p[j] = d
-			j++
+
+		if d&0xc0 == 0x40 {
+			n = int(d & 0x3f)
+			d = rle[i]
+			if i < len(rle)-1 {
+				i++
+			}
+		}
+
+		for ; n > 0; n-- {
+			if j < len(p) {
+				p[j] = d
+				j++
+			}
 		}
 	}
+
 	return p
 }
 
 func rle5Decode(rle []byte, outSize int) []byte {
+	if len(rle) == 0 {
+		return rle
+	}
+
 	p := make([]byte, outSize)
 	i, j := 0, 0
-	for j < len(p) && i < len(rle) {
+
+	for j < len(p) {
 		rl := int(rle[i])
-		i++
-		if i >= len(rle) {
-			break
+		if i < len(rle)-1 {
+			i++
 		}
+
 		dl := int(rle[i] & 0x7f)
 		c := byte(0)
+
 		if rle[i]>>7 != 0 {
-			i++
-			if i >= len(rle) {
-				break
+			if i < len(rle)-1 {
+				i++
 			}
 			c = rle[i]
 		}
-		i++
+
+		if i < len(rle)-1 {
+			i++
+		}
+
 		for {
 			if j < len(p) {
 				p[j] = c
 				j++
 			}
+
 			rl--
 			if rl < 0 {
 				dl--
-				if dl < 0 || i >= len(rle) {
+				if dl < 0 {
 					break
 				}
+
 				c = rle[i] & 0x1f
 				rl = int(rle[i] >> 5)
-				i++
-			}
-			if j >= len(p) {
-				break
+
+				if i < len(rle)-1 {
+					i++
+				}
 			}
 		}
 	}
+
 	return p
 }
 
 func lz5Decode(rle []byte, outSize int) []byte {
-	p := make([]byte, outSize)
 	if len(rle) == 0 {
-		return p
+		return rle
 	}
+
+	p := make([]byte, outSize)
 	i, j, n := 0, 0, 0
-	ct := rle[i]
-	cts := uint(0)
-	rb := byte(0)
-	rbc := uint(0)
-	i++
-	for j < len(p) && i < len(rle) {
-		d := int(rle[i])
+
+	ct, cts, rb, rbc := rle[i], uint(0), byte(0), uint(0)
+	if i < len(rle)-1 {
 		i++
+	}
+
+	for j < len(p) {
+		d := int(rle[i])
+		if i < len(rle)-1 {
+			i++
+		}
+
 		if ct&byte(1<<cts) != 0 {
 			if d&0x3f == 0 {
-				if i+1 >= len(rle) {
-					break
-				}
 				d = (d<<2 | int(rle[i])) + 1
-				i++
+				if i < len(rle)-1 {
+					i++
+				}
+
 				n = int(rle[i]) + 2
-				i++
+				if i < len(rle)-1 {
+					i++
+				}
 			} else {
-				rb |= byte((d & 0xc0) >> rbc)
+				rb |= byte(d&0xc0) >> rbc
 				rbc += 2
+
 				n = int(d & 0x3f)
 				if rbc < 8 {
-					if i >= len(rle) {
-						break
-					}
 					d = int(rle[i]) + 1
-					i++
+					if i < len(rle)-1 {
+						i++
+					}
 				} else {
 					d = int(rb) + 1
 					rb, rbc = 0, 0
 				}
 			}
+
 			for {
-				if j < len(p) && j-d >= 0 {
+				if j < len(p) {
 					p[j] = p[j-d]
 					j++
 				}
+
 				n--
-				if n < 0 || j >= len(p) {
+				if n < 0 {
 					break
 				}
 			}
 		} else {
 			if d&0xe0 == 0 {
-				if i >= len(rle) {
-					break
-				}
 				n = int(rle[i]) + 8
-				i++
+				if i < len(rle)-1 {
+					i++
+				}
 			} else {
 				n = d >> 5
 				d &= 0x1f
 			}
-			for ; n > 0 && j < len(p); n-- {
-				p[j] = byte(d)
-				j++
+
+			for ; n > 0; n-- {
+				if j < len(p) {
+					p[j] = byte(d)
+					j++
+				}
 			}
 		}
+
 		cts++
 		if cts >= 8 {
-			if i >= len(rle) {
-				break
-			}
 			ct, cts = rle[i], 0
-			i++
+			if i < len(rle)-1 {
+				i++
+			}
 		}
 	}
+
 	return p
 }
