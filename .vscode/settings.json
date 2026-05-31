@@ -1,0 +1,13 @@
+{
+  "terminal.integrated.profiles.windows": {
+    "w64devkit": {
+      "path": "C:/w64devkit/bin/sh.exe",
+      "env": {
+        "PATH": "C:\\w64devkit\\bin;C:\\go1.25.4\\bin;C:\\Android\\SDK\\cmake\\3.22.1\\bin",
+        "ANDROID_NDK_HOME": "C:\\Android\\SDK\\ndk\\27.1.12297006"
+      },
+      "cwd": "${workspaceFolder}"
+    },
+  },
+  "terminal.integrated.defaultProfile.windows": "w64devkit"
+}
